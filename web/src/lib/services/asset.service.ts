@@ -1,10 +1,13 @@
+import { goto } from '$app/navigation';
 import { ProjectionType } from '$lib/constants';
 import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
 import { authManager } from '$lib/managers/auth-manager.svelte';
 import { eventManager } from '$lib/managers/event-manager.svelte';
+import { featureFlagsManager } from '$lib/managers/feature-flags-manager.svelte';
 import AssetAddToAlbumModal from '$lib/modals/AssetAddToAlbumModal.svelte';
 import AssetTagModal from '$lib/modals/AssetTagModal.svelte';
 import SharedLinkCreateModal from '$lib/modals/SharedLinkCreateModal.svelte';
+import { Route } from '$lib/route';
 import { isFaceEditMode } from '$lib/stores/face-edit.svelte';
 import { user as authUser, preferences } from '$lib/stores/user.store';
 import type { AssetControlContext } from '$lib/types';
@@ -28,6 +31,7 @@ import { modalManager, toastManager, type ActionItem } from '@immich/ui';
 import {
   mdiAlertOutline,
   mdiCogRefreshOutline,
+  mdiCompare,
   mdiContentCopy,
   mdiDatabaseRefreshOutline,
   mdiDownload,
@@ -100,6 +104,15 @@ export const getAssetActions = ($t: MessageFormatter, asset: AssetResponseDto) =
   const currentAuthUser = get(authUser);
   const userPreferences = get(preferences);
   const isOwner = !!(currentAuthUser && currentAuthUser.id === asset.ownerId);
+  const smartSearchEnabled = featureFlagsManager.value.smartSearch;
+
+  const ViewSimilarPhotos: ActionItem = {
+    title: $t('view_similar_photos'),
+    icon: mdiCompare,
+    type: $t('assets'),
+    $if: () => !!(currentAuthUser && !asset.isArchived && !asset.isTrashed && smartSearchEnabled),
+    onAction: () => goto(Route.search({ queryAssetId: asset.id })),
+  };
 
   const Share: ActionItem = {
     title: $t('share'),
@@ -277,6 +290,7 @@ export const getAssetActions = ($t: MessageFormatter, asset: AssetResponseDto) =
   };
 
   return {
+    ViewSimilarPhotos,
     Share,
     Download,
     DownloadOriginal,
