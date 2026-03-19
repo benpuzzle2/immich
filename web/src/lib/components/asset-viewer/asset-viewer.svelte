@@ -1,680 +1,580 @@
 <script lang="ts">
-  import { browser } from '$app/environment';
-  import { focusTrap } from '$lib/actions/focus-trap';
-  import type { Action, OnAction, PreAction } from '$lib/components/asset-viewer/actions/action';
-  import NextAssetAction from '$lib/components/asset-viewer/actions/next-asset-action.svelte';
-  import PreviousAssetAction from '$lib/components/asset-viewer/actions/previous-asset-action.svelte';
-  import AssetViewerNavBar from '$lib/components/asset-viewer/asset-viewer-nav-bar.svelte';
-  import { preloadManager } from '$lib/components/asset-viewer/PreloadManager.svelte';
-  import OnEvents from '$lib/components/OnEvents.svelte';
-  import { AssetAction, ProjectionType } from '$lib/constants';
-  import { activityManager } from '$lib/managers/activity-manager.svelte';
+  import { goto } from '$app/navigation';
+  import DetailPanelDescription from '$lib/components/asset-viewer/detail-panel-description.svelte';
+  import DetailPanelLocation from '$lib/components/asset-viewer/detail-panel-location.svelte';
+  import DetailPanelRating from '$lib/components/asset-viewer/detail-panel-star-rating.svelte';
+  import DetailPanelTags from '$lib/components/asset-viewer/detail-panel-tags.svelte';
+  import { timeToLoadTheMap } from '$lib/constants';
   import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
   import { authManager } from '$lib/managers/auth-manager.svelte';
-  import { editManager, EditToolType } from '$lib/managers/edit/edit-manager.svelte';
-  import { eventManager } from '$lib/managers/event-manager.svelte';
-  import { getAssetActions } from '$lib/services/asset.service';
-  import { assetViewingStore } from '$lib/stores/asset-viewing.store';
+  import { featureFlagsManager } from '$lib/managers/feature-flags-manager.svelte';
+  import AssetChangeDateModal from '$lib/modals/AssetChangeDateModal.svelte';
+  import { Route } from '$lib/route';
   import { isFaceEditMode } from '$lib/stores/face-edit.svelte';
-  import { ocrManager } from '$lib/stores/ocr.svelte';
-  import { alwaysLoadOriginalVideo } from '$lib/stores/preferences.store';
-  import { SlideshowNavigation, SlideshowState, slideshowStore } from '$lib/stores/slideshow.store';
-  import { user } from '$lib/stores/user.store';
-  import { getSharedLink, handlePromiseError } from '$lib/utils';
-  import type { OnUndoDelete } from '$lib/utils/actions';
-  import { navigateToAsset } from '$lib/utils/asset-utils';
+  import { boundingBoxesArray } from '$lib/stores/people.store';
+  import { locale } from '$lib/stores/preferences.store';
+  import { preferences, user } from '$lib/stores/user.store';
+  import { getAssetMediaUrl, getPeopleThumbnailUrl } from '$lib/utils';
+  import { delay, getDimensions } from '$lib/utils/asset-utils';
+  import { getByteUnitString } from '$lib/utils/byte-units';
   import { handleError } from '$lib/utils/handle-error';
-  import { InvocationTracker } from '$lib/utils/invocationTracker';
-  import { SlideshowHistory } from '$lib/utils/slideshow-history';
-  import { toTimelineAsset } from '$lib/utils/timeline-util';
+  import { fromISODateTime, fromISODateTimeUTC, toTimelineAsset } from '$lib/utils/timeline-util';
+  import { getParentPath } from '$lib/utils/tree-utils';
   import {
-    AssetTypeEnum,
+    AssetMediaSize,
+    getAllAlbums,
     getAssetInfo,
-    getStack,
     type AlbumResponseDto,
     type AssetResponseDto,
-    type PersonResponseDto,
-    type StackResponseDto,
   } from '@immich/sdk';
-  import { CommandPaletteDefaultProvider } from '@immich/ui';
-  import { onDestroy, onMount, untrack } from 'svelte';
-  import type { SwipeCustomEvent } from 'svelte-gestures';
+  import { Icon, IconButton, LoadingSpinner, modalManager, Text } from '@immich/ui';
+  import {
+    mdiCalendar,
+    mdiCamera,
+    mdiCameraIris,
+    mdiClose,
+    mdiEye,
+    mdiEyeOff,
+    mdiImageOutline,
+    mdiInformationOutline,
+    mdiPencil,
+    mdiPlus,
+  } from '@mdi/js';
+  import { DateTime } from 'luxon';
   import { t } from 'svelte-i18n';
-  import { fly } from 'svelte/transition';
-  import Thumbnail from '../assets/thumbnail/thumbnail.svelte';
-  import ActivityStatus from './activity-status.svelte';
-  import ActivityViewer from './activity-viewer.svelte';
-  import DetailPanel from './detail-panel.svelte';
-  import EditorPanel from './editor/editor-panel.svelte';
-  import CropArea from './editor/transform-tool/crop-area.svelte';
-  import ImagePanoramaViewer from './image-panorama-viewer.svelte';
-  import OcrButton from './ocr-button.svelte';
-  import PhotoViewer from './photo-viewer.svelte';
-  import SlideshowBar from './slideshow-bar.svelte';
-  import VideoViewer from './video-wrapper-viewer.svelte';
-
-  export type AssetCursor = {
-    current: AssetResponseDto;
-    nextAsset?: AssetResponseDto;
-    previousAsset?: AssetResponseDto;
-  };
+  import { slide } from 'svelte/transition';
+  import ImageThumbnail from '../assets/thumbnail/image-thumbnail.svelte';
+  import PersonSidePanel from '../faces-page/person-side-panel.svelte';
+  import OnEvents from '../OnEvents.svelte';
+  import UserAvatar from '../shared-components/user-avatar.svelte';
+  import AlbumListItemDetails from './album-list-item-details.svelte';
 
   interface Props {
-    cursor: AssetCursor;
-    showNavigation?: boolean;
-    withStacked?: boolean;
-    isShared?: boolean;
-    album?: AlbumResponseDto;
-    person?: PersonResponseDto;
-    onAssetChange?: (asset: AssetResponseDto) => void;
-    preAction?: PreAction;
-    onAction?: OnAction;
-    onUndoDelete?: OnUndoDelete;
-    onClose?: (asset: AssetResponseDto) => void;
-    onRandom?: () => Promise<{ id: string } | undefined>;
+    asset: AssetResponseDto;
+    currentAlbum?: AlbumResponseDto | null;
   }
 
-  let {
-    cursor,
-    showNavigation = true,
-    withStacked = false,
-    isShared = false,
-    album,
-    person,
-    onAssetChange,
-    preAction,
-    onAction,
-    onUndoDelete,
-    onClose,
-    onRandom,
-  }: Props = $props();
+  let { asset, currentAlbum = null }: Props = $props();
 
-  const { setAssetId } = assetViewingStore;
-  const {
-    restartProgress: restartSlideshowProgress,
-    stopProgress: stopSlideshowProgress,
-    slideshowNavigation,
-    slideshowState,
-    slideshowRepeat,
-  } = slideshowStore;
-  const stackThumbnailSize = 60;
-  const stackSelectedThumbnailSize = 65;
+  let showAssetPath = $state(true);
+  let showEditFaces = $state(false);
+  let isOwner = $derived($user?.id === asset.ownerId);
+  let people = $derived(asset.people || []);
+  let unassignedFaces = $derived(asset.unassignedFaces || []);
+  let showingHiddenPeople = $state(false);
+  let timeZone = $derived(asset.exifInfo?.timeZone ?? undefined);
+  let dateTime = $derived(
+    timeZone && asset.exifInfo?.dateTimeOriginal
+      ? fromISODateTime(asset.exifInfo.dateTimeOriginal, timeZone)
+      : fromISODateTimeUTC(asset.localDateTime),
+  );
+  let latlng = $derived(
+    (() => {
+      const lat = asset.exifInfo?.latitude;
+      const lng = asset.exifInfo?.longitude;
 
-  let previewStackedAsset: AssetResponseDto | undefined = $state();
-  let stack: StackResponseDto | null = $state(null);
+      if (lat && lng) {
+        return { lat: Number(lat.toFixed(7)), lng: Number(lng.toFixed(7)) };
+      }
+    })(),
+  );
+  let previousId: string | undefined = $state();
+  let previousRoute = $derived(currentAlbum?.id ? Route.viewAlbum(currentAlbum) : Route.photos());
 
-  const asset = $derived(previewStackedAsset ?? cursor.current);
-  const nextAsset = $derived(cursor.nextAsset);
-  const previousAsset = $derived(cursor.previousAsset);
-  let sharedLink = getSharedLink();
-  let fullscreenElement = $state<Element>();
-
-  let playOriginalVideo = $state($alwaysLoadOriginalVideo);
-  let slideshowStartAssetId = $state<string>();
-
-  const setPlayOriginalVideo = (value: boolean) => {
-    playOriginalVideo = value;
-  };
-
-  const refreshStack = async () => {
-    if (authManager.isSharedLink || !withStacked) {
-      return;
-    }
-
-    if (asset.stack) {
-      stack = await getStack({ id: asset.stack.id });
-    }
-
-    if (!stack?.assets.some(({ id }) => id === asset.id)) {
-      stack = null;
-    }
-  };
-
-  const handleFavorite = async () => {
-    if (!album || !album.isActivityEnabled) {
-      return;
+  const refreshAlbums = async () => {
+    if (authManager.isSharedLink) {
+      return [];
     }
 
     try {
-      await activityManager.toggleLike();
+      return await getAllAlbums({ assetId: asset.id });
     } catch (error) {
-      handleError(error, $t('errors.unable_to_change_favorite'));
+      handleError(error, 'Error getting asset album membership');
+      return [];
     }
   };
 
-  const onAssetUpdate = (updatedAsset: AssetResponseDto) => {
-    if (asset.id === updatedAsset.id) {
-      cursor = { ...cursor, current: updatedAsset };
+  let albums = $derived(refreshAlbums());
+
+  $effect(() => {
+    if (!previousId) {
+      previousId = asset.id;
+      return;
     }
+
+    if (asset.id === previousId) {
+      return;
+    }
+
+    showEditFaces = false;
+    previousId = asset.id;
+  });
+
+  const getMegapixel = (width: number, height: number): number | undefined => {
+    const megapixel = Math.round((height * width) / 1_000_000);
+
+    if (megapixel) {
+      return megapixel;
+    }
+
+    return undefined;
   };
 
-  onMount(() => {
-    syncAssetViewerOpenClass(true);
-    const slideshowStateUnsubscribe = slideshowState.subscribe((value) => {
-      if (value === SlideshowState.PlaySlideshow) {
-        slideshowHistory.reset();
-        slideshowHistory.queue(toTimelineAsset(asset));
-        handlePromiseError(handlePlaySlideshow());
-      } else if (value === SlideshowState.StopSlideshow) {
-        handlePromiseError(handleStopSlideshow());
-      }
+  const handleRefreshPeople = async () => {
+    asset = await getAssetInfo({ id: asset.id });
+    showEditFaces = false;
+  };
+
+  const getAssetFolderHref = (asset: AssetResponseDto) => {
+    // Remove the last part of the path to get the parent path
+    return Route.folders({ path: getParentPath(asset.originalPath) });
+  };
+
+  const toggleAssetPath = () => (showAssetPath = !showAssetPath);
+
+  const handleChangeDate = async () => {
+    if (!isOwner) {
+      return;
+    }
+
+    await modalManager.show(AssetChangeDateModal, {
+      asset: toTimelineAsset(asset),
+      initialDate: dateTime,
+      initialTimeZone: timeZone,
     });
-
-    const slideshowNavigationUnsubscribe = slideshowNavigation.subscribe((value) => {
-      if (value === SlideshowNavigation.Shuffle) {
-        slideshowHistory.reset();
-        slideshowHistory.queue(toTimelineAsset(asset));
-      }
-    });
-
-    return () => {
-      slideshowStateUnsubscribe();
-      slideshowNavigationUnsubscribe();
-    };
-  });
-
-  onDestroy(() => {
-    activityManager.reset();
-    assetViewerManager.closeEditor();
-    syncAssetViewerOpenClass(false);
-    preloadManager.destroy();
-  });
-
-  const closeViewer = () => {
-    onClose?.(asset);
-  };
-
-  const closeEditor = async () => {
-    if (editManager.hasAppliedEdits) {
-      const refreshedAsset = await getAssetInfo({ id: asset.id });
-      onAssetChange?.(refreshedAsset);
-      assetViewingStore.setAsset(refreshedAsset);
-    }
-    assetViewerManager.closeEditor();
-  };
-
-  const tracker = new InvocationTracker();
-  const navigateAsset = (order?: 'previous' | 'next') => {
-    if (!order) {
-      if ($slideshowState === SlideshowState.PlaySlideshow) {
-        order = $slideshowNavigation === SlideshowNavigation.AscendingOrder ? 'previous' : 'next';
-      } else {
-        return;
-      }
-    }
-
-    preloadManager.cancelBeforeNavigation(order);
-
-    if (tracker.isActive()) {
-      return;
-    }
-
-    void tracker.invoke(async () => {
-      const isShuffle =
-        $slideshowState === SlideshowState.PlaySlideshow && $slideshowNavigation === SlideshowNavigation.Shuffle;
-
-      let hasNext: boolean;
-
-      if (isShuffle) {
-        hasNext = order === 'previous' ? slideshowHistory.previous() : slideshowHistory.next();
-        if (!hasNext) {
-          const asset = await onRandom?.();
-          if (asset) {
-            slideshowHistory.queue(asset);
-            hasNext = true;
-          }
-        }
-      } else {
-        hasNext =
-          order === 'previous' ? await navigateToAsset(cursor.previousAsset) : await navigateToAsset(cursor.nextAsset);
-      }
-
-      if ($slideshowState !== SlideshowState.PlaySlideshow) {
-        return;
-      }
-
-      if (hasNext) {
-        $restartSlideshowProgress = true;
-        return;
-      }
-
-      if ($slideshowRepeat && slideshowStartAssetId) {
-        await setAssetId(slideshowStartAssetId);
-        $restartSlideshowProgress = true;
-        return;
-      }
-
-      await handleStopSlideshow();
-    }, $t('error_while_navigating'));
-  };
-
-  /**
-   * Slide show mode
-   */
-
-  let assetViewerHtmlElement = $state<HTMLElement>();
-
-  const slideshowHistory = new SlideshowHistory((asset) => {
-    handlePromiseError(setAssetId(asset.id).then(() => ($restartSlideshowProgress = true)));
-  });
-
-  const handleVideoStarted = () => {
-    if ($slideshowState === SlideshowState.PlaySlideshow) {
-      $stopSlideshowProgress = true;
-    }
-  };
-
-  const handlePlaySlideshow = async () => {
-    slideshowStartAssetId = asset.id;
-    try {
-      await assetViewerHtmlElement?.requestFullscreen?.();
-    } catch (error) {
-      handleError(error, $t('errors.unable_to_enter_fullscreen'));
-      $slideshowState = SlideshowState.StopSlideshow;
-    }
-  };
-
-  const handleStopSlideshow = async () => {
-    try {
-      if (document.fullscreenElement) {
-        document.body.style.cursor = '';
-        await document.exitFullscreen();
-      }
-    } catch (error) {
-      handleError(error, $t('errors.unable_to_exit_fullscreen'));
-    } finally {
-      $stopSlideshowProgress = true;
-      $slideshowState = SlideshowState.None;
-    }
-  };
-
-  const handleStackedAssetMouseEvent = (isMouseOver: boolean, stackedAsset: AssetResponseDto) => {
-    previewStackedAsset = isMouseOver ? stackedAsset : undefined;
-  };
-
-  const handlePreAction = (action: Action) => {
-    preAction?.(action);
-  };
-
-  const handleAction = async (action: Action) => {
-    switch (action.type) {
-      case AssetAction.DELETE:
-      case AssetAction.TRASH: {
-        eventManager.emit('AssetsDelete', [asset.id]);
-        break;
-      }
-      case AssetAction.REMOVE_ASSET_FROM_STACK: {
-        stack = action.stack;
-        if (stack) {
-          cursor.current = stack.assets[0];
-        }
-        break;
-      }
-      case AssetAction.STACK:
-      case AssetAction.SET_STACK_PRIMARY_ASSET: {
-        stack = action.stack;
-        break;
-      }
-      case AssetAction.SET_PERSON_FEATURED_PHOTO: {
-        const assetInfo = await getAssetInfo({ id: asset.id });
-        cursor.current = { ...asset, people: assetInfo.people };
-        break;
-      }
-      case AssetAction.RATING: {
-        cursor.current = {
-          ...asset,
-          exifInfo: {
-            ...asset.exifInfo,
-            rating: action.rating,
-          },
-        };
-        break;
-      }
-      case AssetAction.UNSTACK: {
-        closeViewer();
-        break;
-      }
-    }
-
-    onAction?.(action);
-  };
-
-  let isFullScreen = $derived(fullscreenElement !== null);
-
-  $effect(() => {
-    if (album && !album.isActivityEnabled && activityManager.commentCount === 0) {
-      assetViewerManager.closeActivityPanel();
-    }
-  });
-  $effect(() => {
-    if (album && isShared && asset.id) {
-      handlePromiseError(activityManager.init(album.id, asset.id));
-    }
-  });
-
-  const syncAssetViewerOpenClass = (isOpen: boolean) => {
-    if (browser) {
-      document.body.classList.toggle('asset-viewer-open', isOpen);
-    }
-  };
-
-  const refresh = async () => {
-    await refreshStack();
-    ocrManager.clear();
-    if (!sharedLink) {
-      if (previewStackedAsset) {
-        await ocrManager.getAssetOcr(previewStackedAsset.id);
-      }
-      await ocrManager.getAssetOcr(asset.id);
-    }
-  };
-
-  $effect(() => {
-    // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-    asset;
-    untrack(() => handlePromiseError(refresh()));
-  });
-
-  let lastCursor = $state<AssetCursor>();
-
-  $effect(() => {
-    if (cursor.current.id === lastCursor?.current.id) {
-      return;
-    }
-    if (lastCursor) {
-      preloadManager.updateAfterNavigation(lastCursor, cursor, sharedLink);
-    }
-    if (!lastCursor) {
-      preloadManager.initializePreloads(cursor, sharedLink);
-    }
-    lastCursor = cursor;
-  });
-
-  const viewerKind = $derived.by(() => {
-    if (previewStackedAsset) {
-      return previewStackedAsset.type === AssetTypeEnum.Image ? 'PhotoViewer' : 'StackVideoViewer';
-    }
-    if (asset.type === AssetTypeEnum.Video) {
-      return 'VideoViewer';
-    }
-    if (assetViewerManager.isPlayingMotionPhoto && asset.livePhotoVideoId) {
-      return 'LiveVideoViewer';
-    }
-    if (
-      asset.exifInfo?.projectionType === ProjectionType.EQUIRECTANGULAR ||
-      (asset.originalPath && asset.originalPath.toLowerCase().endsWith('.insp'))
-    ) {
-      return 'ImagePanaramaViewer';
-    }
-    if (assetViewerManager.isShowEditor && editManager.selectedTool?.type === EditToolType.Transform) {
-      return 'CropArea';
-    }
-    return 'PhotoViewer';
-  });
-
-  const showActivityStatus = $derived(
-    $slideshowState === SlideshowState.None &&
-      isShared &&
-      ((album && album.isActivityEnabled) || activityManager.commentCount > 0) &&
-      !activityManager.isLoading,
-  );
-
-  const showOcrButton = $derived(
-    $slideshowState === SlideshowState.None &&
-      asset.type === AssetTypeEnum.Image &&
-      !assetViewerManager.isShowEditor &&
-      ocrManager.hasOcrData,
-  );
-
-  const { Tag, TagPeople } = $derived(getAssetActions($t, asset));
-  const showDetailPanel = $derived(
-    asset.hasMetadata &&
-      $slideshowState === SlideshowState.None &&
-      assetViewerManager.isShowDetailPanel &&
-      !assetViewerManager.isShowEditor,
-  );
-
-  const onSwipe = (event: SwipeCustomEvent) => {
-    if (assetViewerManager.zoom > 1) {
-      return;
-    }
-
-    if (ocrManager.showOverlay) {
-      return;
-    }
-
-    if (event.detail.direction === 'left') {
-      navigateAsset('next');
-    }
-
-    if (event.detail.direction === 'right') {
-      navigateAsset('previous');
-    }
   };
 </script>
 
-<CommandPaletteDefaultProvider name={$t('assets')} actions={[Tag, TagPeople]} />
-<OnEvents {onAssetUpdate} />
+<OnEvents onAlbumAddAssets={() => (albums = refreshAlbums())} />
 
-<svelte:document bind:fullscreenElement />
-
-<section
-  id="immich-asset-viewer"
-  class="fixed start-0 top-0 grid size-full grid-cols-4 grid-rows-[64px_1fr] overflow-hidden bg-black"
-  use:focusTrap
-  bind:this={assetViewerHtmlElement}
->
-  <!-- Top navigation bar -->
-  {#if $slideshowState === SlideshowState.None && !assetViewerManager.isShowEditor}
-    <div class="col-span-4 col-start-1 row-span-1 row-start-1 transition-transform">
-      <AssetViewerNavBar
-        {asset}
-        {album}
-        {person}
-        {stack}
-        showSlideshow={true}
-        preAction={handlePreAction}
-        onAction={handleAction}
-        {onUndoDelete}
-        onPlaySlideshow={() => ($slideshowState = SlideshowState.PlaySlideshow)}
-        onClose={onClose ? () => onClose(asset) : undefined}
-        {playOriginalVideo}
-        {setPlayOriginalVideo}
-      />
-    </div>
-  {/if}
-
-  {#if $slideshowState != SlideshowState.None}
-    <div class="absolute w-full flex justify-center">
-      <SlideshowBar
-        {isFullScreen}
-        assetType={previewStackedAsset?.type ?? asset.type}
-        onSetToFullScreen={() => assetViewerHtmlElement?.requestFullscreen?.()}
-        onPrevious={() => navigateAsset('previous')}
-        onNext={() => navigateAsset('next')}
-        onClose={() => ($slideshowState = SlideshowState.StopSlideshow)}
-      />
-    </div>
-  {/if}
-
-  {#if $slideshowState === SlideshowState.None && showNavigation && !assetViewerManager.isShowEditor && !isFaceEditMode.value && previousAsset}
-    <div class="my-auto col-span-1 col-start-1 row-span-full row-start-1 justify-self-start">
-      <PreviousAssetAction onPreviousAsset={() => navigateAsset('previous')} />
-    </div>
-  {/if}
-
-  <!-- Asset Viewer -->
-  <div data-viewer-content class="z-[-1] relative col-start-1 col-span-4 row-start-1 row-span-full">
-    {#if viewerKind === 'StackVideoViewer'}
-      <VideoViewer
-        asset={previewStackedAsset!}
-        cacheKey={previewStackedAsset!.thumbhash}
-        projectionType={previewStackedAsset!.exifInfo?.projectionType}
-        loopVideo={true}
-        onPreviousAsset={() => navigateAsset('previous')}
-        onNextAsset={() => navigateAsset('next')}
-        onClose={closeViewer}
-        onVideoEnded={() => navigateAsset()}
-        onVideoStarted={handleVideoStarted}
-        {playOriginalVideo}
-      />
-    {:else if viewerKind === 'LiveVideoViewer'}
-      <VideoViewer
-        {asset}
-        assetId={asset.livePhotoVideoId!}
-        cacheKey={asset.thumbhash}
-        projectionType={asset.exifInfo?.projectionType}
-        loopVideo={$slideshowState !== SlideshowState.PlaySlideshow}
-        onPreviousAsset={() => navigateAsset('previous')}
-        onNextAsset={() => navigateAsset('next')}
-        onVideoEnded={() => (assetViewerManager.isPlayingMotionPhoto = false)}
-        {playOriginalVideo}
-      />
-    {:else if viewerKind === 'ImagePanaramaViewer'}
-      <ImagePanoramaViewer {asset} />
-    {:else if viewerKind === 'CropArea'}
-      <CropArea {asset} />
-    {:else if viewerKind === 'PhotoViewer'}
-      <PhotoViewer cursor={{ ...cursor, current: asset }} {sharedLink} {onSwipe} />
-    {:else if viewerKind === 'VideoViewer'}
-      <VideoViewer
-        {asset}
-        cacheKey={asset.thumbhash}
-        projectionType={asset.exifInfo?.projectionType}
-        loopVideo={$slideshowState !== SlideshowState.PlaySlideshow}
-        onPreviousAsset={() => navigateAsset('previous')}
-        onNextAsset={() => navigateAsset('next')}
-        onClose={closeViewer}
-        onVideoEnded={() => navigateAsset()}
-        onVideoStarted={handleVideoStarted}
-        {playOriginalVideo}
-      />
-    {/if}
-
-    {#if showActivityStatus}
-      <div class="absolute bottom-0 end-0 mb-20 me-8">
-        <ActivityStatus
-          disabled={!album?.isActivityEnabled}
-          isLiked={activityManager.isLiked}
-          numberOfComments={activityManager.commentCount}
-          numberOfLikes={activityManager.likeCount}
-          onFavorite={handleFavorite}
-        />
-      </div>
-    {/if}
-
-    {#if showOcrButton}
-      <div class="absolute bottom-0 end-0 mb-6 me-6">
-        <OcrButton />
-      </div>
-    {/if}
+<section class="relative p-2">
+  <div class="flex place-items-center gap-2">
+    <IconButton
+      icon={mdiClose}
+      aria-label={$t('close')}
+      onclick={() => assetViewerManager.closeDetailPanel()}
+      shape="round"
+      color="secondary"
+      variant="ghost"
+    />
+    <p class="text-lg text-immich-fg dark:text-immich-dark-fg">{$t('info')}</p>
   </div>
 
-  {#if $slideshowState === SlideshowState.None && showNavigation && !assetViewerManager.isShowEditor && !isFaceEditMode.value && nextAsset}
-    <div class="my-auto col-span-1 col-start-4 row-span-full row-start-1 justify-self-end">
-      <NextAssetAction onNextAsset={() => navigateAsset('next')} />
-    </div>
-  {/if}
-
-  {#if showDetailPanel || assetViewerManager.isShowEditor}
-    <div
-      transition:fly={{ duration: 150 }}
-      id="detail-panel"
-      class="row-start-1 row-span-4 overflow-y-auto transition-all dark:border-l dark:border-s-immich-dark-gray bg-light"
-      translate="yes"
-    >
-      {#if showDetailPanel}
-        <div class="w-90 h-full">
-          <DetailPanel {asset} currentAlbum={album} />
+  {#if asset.isOffline}
+    <section class="px-4 py-4">
+      <div role="alert">
+        <div class="rounded-t bg-red-500 px-4 py-2 font-bold text-white">
+          {$t('asset_offline')}
         </div>
-      {:else if assetViewerManager.isShowEditor}
-        <div class="w-100 h-full">
-          <EditorPanel {asset} onClose={closeEditor} />
-        </div>
-      {/if}
-    </div>
-  {/if}
-
-  {#if stack && withStacked && !assetViewerManager.isShowEditor}
-    {@const stackedAssets = stack.assets}
-    <div id="stack-slideshow" class="absolute bottom-0 w-full col-span-4 col-start-1 pointer-events-none">
-      <div class="relative flex flex-row no-wrap overflow-x-auto overflow-y-hidden horizontal-scrollbar">
-        {#each stackedAssets as stackedAsset (stackedAsset.id)}
-          <div
-            class={['inline-block px-1 relative transition-all pb-2 pointer-events-auto']}
-            style:bottom={stackedAsset.id === asset.id ? '0' : '-10px'}
-          >
-            <Thumbnail
-              imageClass={{ 'border-2 border-white': stackedAsset.id === asset.id }}
-              brokenAssetClass="text-xs"
-              dimmed={stackedAsset.id !== asset.id}
-              asset={toTimelineAsset(stackedAsset)}
-              onClick={() => {
-                cursor.current = stackedAsset;
-                previewStackedAsset = undefined;
-              }}
-              onMouseEvent={({ isMouseOver }) => handleStackedAssetMouseEvent(isMouseOver, stackedAsset)}
-              readonly
-              thumbnailSize={stackedAsset.id === asset.id ? stackSelectedThumbnailSize : stackThumbnailSize}
-              showStackedIcon={false}
-              disableLinkMouseOver
-            />
-
-            {#if stackedAsset.id === asset.id}
-              <div class="w-full flex place-items-center place-content-center">
-                <div class="w-2 h-2 bg-white rounded-full flex mt-0.5"></div>
-              </div>
+        <div class="border border-t-0 border-red-400 bg-red-100 px-4 py-3 text-red-700">
+          <p>
+            {#if $user?.isAdmin}
+              {$t('admin.asset_offline_description')}
+            {:else}
+              {$t('asset_offline_description')}
             {/if}
-          </div>
+          </p>
+        </div>
+        <div class="rounded-b bg-red-500 px-4 py-2 text-white text-sm">
+          <p>{asset.originalPath}</p>
+        </div>
+      </div>
+    </section>
+  {/if}
+
+  <DetailPanelDescription {asset} {isOwner} />
+  <DetailPanelRating {asset} {isOwner} />
+
+  {#if !authManager.isSharedLink && isOwner}
+    <section class="px-4 pt-4 text-sm">
+      <div class="flex h-10 w-full items-center justify-between">
+        <Text size="small" color="muted">{$t('people')}</Text>
+        <div class="flex gap-2 items-center">
+          {#if people.some((person) => person.isHidden)}
+            <IconButton
+              aria-label={$t('show_hidden_people')}
+              icon={showingHiddenPeople ? mdiEyeOff : mdiEye}
+              size="medium"
+              shape="round"
+              color="secondary"
+              variant="ghost"
+              onclick={() => (showingHiddenPeople = !showingHiddenPeople)}
+            />
+          {/if}
+          <IconButton
+            aria-label={$t('tag_people')}
+            icon={mdiPlus}
+            size="medium"
+            shape="round"
+            color="secondary"
+            variant="ghost"
+            onclick={() => (isFaceEditMode.value = !isFaceEditMode.value)}
+          />
+
+          {#if people.length > 0 || unassignedFaces.length > 0}
+            <IconButton
+              aria-label={$t('edit_people')}
+              icon={mdiPencil}
+              size="medium"
+              shape="round"
+              color="secondary"
+              variant="ghost"
+              onclick={() => (showEditFaces = true)}
+            />
+          {/if}
+        </div>
+      </div>
+
+      <div class="mt-2 flex flex-wrap gap-2">
+        {#each people as person, index (person.id)}
+          {#if showingHiddenPeople || !person.isHidden}
+            <a
+              class="w-22"
+              href={Route.viewPerson(person, { previousRoute })}
+              onfocus={() => ($boundingBoxesArray = people[index].faces)}
+              onblur={() => ($boundingBoxesArray = [])}
+              onmouseover={() => ($boundingBoxesArray = people[index].faces)}
+              onmouseleave={() => ($boundingBoxesArray = [])}
+            >
+              <div class="relative">
+                <ImageThumbnail
+                  curve
+                  shadow
+                  url={getPeopleThumbnailUrl(person)}
+                  altText={person.name}
+                  title={person.name}
+                  widthStyle="90px"
+                  heightStyle="90px"
+                  hidden={person.isHidden}
+                />
+              </div>
+              <p class="mt-1 truncate font-medium" title={person.name}>{person.name}</p>
+              {#if person.birthDate}
+                {@const personBirthDate = DateTime.fromISO(person.birthDate)}
+                {@const age = Math.floor(DateTime.fromISO(asset.localDateTime).diff(personBirthDate, 'years').years)}
+                {@const ageInMonths = Math.floor(
+                  DateTime.fromISO(asset.localDateTime).diff(personBirthDate, 'months').months,
+                )}
+                {#if age >= 0}
+                  <p
+                    class="font-light"
+                    title={personBirthDate.toLocaleString(
+                      {
+                        month: 'long',
+                        day: 'numeric',
+                        year: 'numeric',
+                      },
+                      { locale: $locale },
+                    )}
+                  >
+                    {#if ageInMonths <= 11}
+                      {$t('age_months', { values: { months: ageInMonths } })}
+                    {:else if ageInMonths > 12 && ageInMonths <= 23}
+                      {$t('age_year_months', { values: { months: ageInMonths - 12 } })}
+                    {:else}
+                      {$t('age_years', { values: { years: age } })}
+                    {/if}
+                  </p>
+                {/if}
+              {/if}
+            </a>
+          {/if}
         {/each}
       </div>
-    </div>
+    </section>
   {/if}
 
-  {#if isShared && album && assetViewerManager.isShowActivityPanel && $user}
-    <div
-      transition:fly={{ duration: 150 }}
-      id="activity-panel"
-      class="row-start-1 row-span-5 w-90 md:w-115 overflow-y-auto transition-all dark:border-l dark:border-s-immich-dark-gray"
-      translate="yes"
-    >
-      <ActivityViewer
-        user={$user}
-        disabled={!album.isActivityEnabled}
-        assetType={asset.type}
-        albumOwnerId={album.ownerId}
-        albumId={album.id}
-        assetId={asset.id}
-      />
+  <div class="px-4 py-4">
+    {#if asset.exifInfo}
+      <div class="flex h-10 w-full items-center justify-between text-sm">
+        <Text size="small" color="muted">{$t('details')}</Text>
+      </div>
+    {:else}
+      <Text size="small" color="muted">{$t('no_exif_info_available')}</Text>
+    {/if}
+
+    {#if dateTime}
+      <button
+        type="button"
+        class="flex w-full text-start justify-between place-items-start gap-4 py-4"
+        onclick={handleChangeDate}
+        title={isOwner ? $t('edit_date') : ''}
+        class:hover:text-primary={isOwner}
+      >
+        <div class="flex gap-4">
+          <div>
+            <Icon icon={mdiCalendar} size="24" />
+          </div>
+
+          <div>
+            <p>
+              {dateTime.toLocaleString(
+                {
+                  month: 'short',
+                  day: 'numeric',
+                  year: 'numeric',
+                },
+                { locale: $locale },
+              )}
+            </p>
+            <div class="flex gap-2 text-sm">
+              <p>
+                {dateTime.toLocaleString(
+                  {
+                    weekday: 'short',
+                    hour: 'numeric',
+                    minute: '2-digit',
+                    second: '2-digit',
+                    timeZoneName: timeZone ? 'longOffset' : undefined,
+                  },
+                  { locale: $locale },
+                )}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {#if isOwner}
+          <div class="p-1">
+            <Icon icon={mdiPencil} size="20" />
+          </div>
+        {/if}
+      </button>
+    {:else if !dateTime && isOwner}
+      <div class="flex justify-between place-items-start gap-4 py-4">
+        <div class="flex gap-4">
+          <div>
+            <Icon icon={mdiCalendar} size="24" />
+          </div>
+        </div>
+        <div class="p-1">
+          <Icon icon={mdiPencil} size="20" />
+        </div>
+      </div>
+    {/if}
+
+    <div class="flex gap-4 py-4">
+      <div><Icon icon={mdiImageOutline} size="24" /></div>
+
+      <div>
+        <p class="break-all flex place-items-center gap-2 whitespace-pre-wrap">
+          {asset.originalFileName}
+          {#if isOwner}
+            <IconButton
+              icon={mdiInformationOutline}
+              aria-label={$t('show_file_location')}
+              size="small"
+              shape="round"
+              color="secondary"
+              variant="ghost"
+              onclick={toggleAssetPath}
+            />
+          {/if}
+        </p>
+        {#if showAssetPath}
+          <p class="text-sm opacity-90 break-all pb-2 hover:text-primary" transition:slide={{ duration: 250 }}>
+            <!-- eslint-disable-next-line svelte/no-navigation-without-resolve this is supposed to be treated as an absolute/external link -->
+            <a href={getAssetFolderHref(asset)} title={$t('go_to_folder')} class="whitespace-pre-wrap">
+              {asset.originalPath}
+            </a>
+          </p>
+        {/if}
+        {#if (asset.exifInfo?.exifImageHeight && asset.exifInfo?.exifImageWidth) || asset.exifInfo?.fileSizeInByte}
+          <div class="flex gap-2 text-sm">
+            {#if asset.exifInfo?.exifImageHeight && asset.exifInfo?.exifImageWidth}
+              {#if getMegapixel(asset.exifInfo.exifImageHeight, asset.exifInfo.exifImageWidth)}
+                <p>
+                  {getMegapixel(asset.exifInfo.exifImageHeight, asset.exifInfo.exifImageWidth)} MP
+                </p>
+              {/if}
+              {@const { width, height } = getDimensions(asset.exifInfo)}
+              <p>{width} x {height}</p>
+            {/if}
+            {#if asset.exifInfo?.fileSizeInByte}
+              <p>{getByteUnitString(asset.exifInfo.fileSizeInByte, $locale)}</p>
+            {/if}
+          </div>
+        {/if}
+      </div>
     </div>
-  {/if}
+
+    {#if asset.exifInfo?.make || asset.exifInfo?.model || asset.exifInfo?.exposureTime || asset.exifInfo?.iso}
+      <div class="flex gap-4 py-4">
+        <div><Icon icon={mdiCamera} size="24" /></div>
+
+        <div>
+          {#if asset.exifInfo?.make || asset.exifInfo?.model}
+            <p>
+              <a
+                href={Route.search({
+                  make: asset.exifInfo?.make ?? undefined,
+                  model: asset.exifInfo?.model ?? undefined,
+                })}
+                title="{$t('search_for')} {asset.exifInfo.make || ''} {asset.exifInfo.model || ''}"
+                class="hover:text-primary"
+              >
+                {asset.exifInfo.make || ''}
+                {asset.exifInfo.model || ''}
+              </a>
+            </p>
+          {/if}
+
+          <div class="flex gap-2 text-sm">
+            {#if asset.exifInfo.exposureTime}
+              <p>{`${asset.exifInfo.exposureTime} s`}</p>
+            {/if}
+
+            {#if asset.exifInfo.iso}
+              <p>{`ISO ${asset.exifInfo.iso}`}</p>
+            {/if}
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if asset.exifInfo?.lensModel || asset.exifInfo?.fNumber || asset.exifInfo?.focalLength}
+      <div class="flex gap-4 py-4">
+        <div><Icon icon={mdiCameraIris} size="24" /></div>
+
+        <div>
+          {#if asset.exifInfo?.lensModel}
+            <p>
+              <a
+                href={Route.search({ lensModel: asset.exifInfo.lensModel })}
+                title="{$t('search_for')} {asset.exifInfo.lensModel}"
+                class="hover:text-primary line-clamp-1"
+              >
+                {asset.exifInfo.lensModel}
+              </a>
+            </p>
+          {/if}
+
+          <div class="flex gap-2 text-sm">
+            {#if asset.exifInfo?.fNumber}
+              <p>ƒ/{asset.exifInfo.fNumber.toLocaleString($locale)}</p>
+            {/if}
+
+            {#if asset.exifInfo.focalLength}
+              <p>{`${asset.exifInfo.focalLength.toLocaleString($locale)} mm`}</p>
+            {/if}
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    <DetailPanelLocation {isOwner} {asset} />
+  </div>
 </section>
 
-<style>
-  #immich-asset-viewer {
-    contain: layout;
-  }
+{#if latlng && featureFlagsManager.value.map}
+  <div class="h-90">
+    {#await import('$lib/components/shared-components/map/map.svelte')}
+      {#await delay(timeToLoadTheMap) then}
+        <!-- show the loading spinner only if loading the map takes too much time -->
+        <div class="flex items-center justify-center h-full w-full">
+          <LoadingSpinner />
+        </div>
+      {/await}
+    {:then { default: Map }}
+      <Map
+        mapMarkers={[
+          {
+            lat: latlng.lat,
+            lon: latlng.lng,
+            id: asset.id,
+            city: asset.exifInfo?.city ?? null,
+            state: asset.exifInfo?.state ?? null,
+            country: asset.exifInfo?.country ?? null,
+          },
+        ]}
+        center={latlng}
+        showSettings={false}
+        zoom={12.5}
+        simplified
+        useLocationPin
+        showSimpleControls={!showEditFaces}
+        onOpenInMapView={() => goto(Route.map({ ...latlng, zoom: 12.5 }))}
+      >
+        {#snippet popup({ marker })}
+          {@const { lat, lon } = marker}
+          <div class="flex flex-col items-center gap-1">
+            <p class="font-bold">{lat.toPrecision(6)}, {lon.toPrecision(6)}</p>
+            <a
+              href="https://www.openstreetmap.org/?mlat={lat}&mlon={lon}&zoom=13#map=15/{lat}/{lon}"
+              target="_blank"
+              class="font-medium text-primary underline focus:outline-none"
+            >
+              {$t('open_in_openstreetmap')}
+            </a>
+          </div>
+        {/snippet}
+      </Map>
+    {/await}
+  </div>
+{/if}
 
-  .horizontal-scrollbar::-webkit-scrollbar {
-    width: 8px;
-    height: 10px;
-  }
+{#if currentAlbum && currentAlbum.albumUsers.length > 0 && asset.owner}
+  <section class="px-6 dark:text-immich-dark-fg mt-4">
+    <Text size="small" color="muted">{$t('shared_by')}</Text>
+    <div class="flex gap-4 pt-4">
+      <div>
+        <UserAvatar user={asset.owner} size="md" />
+      </div>
 
-  /* Track */
-  .horizontal-scrollbar::-webkit-scrollbar-track {
-    background: #000000;
-    border-radius: 16px;
-  }
+      <div class="mb-auto mt-auto">
+        <p>
+          {asset.owner.name}
+        </p>
+      </div>
+    </div>
+  </section>
+{/if}
 
-  /* Handle */
-  .horizontal-scrollbar::-webkit-scrollbar-thumb {
-    background: rgba(159, 159, 159, 0.408);
-    border-radius: 16px;
-  }
+{#await albums then albums}
+  {#if albums.length > 0}
+    <section class="px-6 py-6 dark:text-immich-dark-fg">
+      <div class="pb-4">
+        <Text size="small" color="muted">{$t('appears_in')}</Text>
+      </div>
+      {#each albums as album (album.id)}
+        <a href={Route.viewAlbum(album)}>
+          <div class="flex gap-4 pt-2 hover:cursor-pointer items-center">
+            <div>
+              <img
+                alt={album.albumName}
+                class="h-12.5 w-12.5 rounded object-cover"
+                src={album.albumThumbnailAssetId &&
+                  getAssetMediaUrl({ id: album.albumThumbnailAssetId, size: AssetMediaSize.Preview })}
+                draggable="false"
+              />
+            </div>
 
-  /* Handle on hover */
-  .horizontal-scrollbar::-webkit-scrollbar-thumb:hover {
-    background: #adcbfa;
-    border-radius: 16px;
-  }
-</style>
+            <div class="mb-auto mt-auto">
+              <p class="dark:text-immich-dark-primary">{album.albumName}</p>
+              <div class="flex flex-col gap-0 text-sm">
+                <div>
+                  <AlbumListItemDetails {album} />
+                </div>
+              </div>
+            </div>
+          </div>
+        </a>
+      {/each}
+    </section>
+  {/if}
+{/await}
+
+{#if $preferences?.tags?.enabled}
+  <section class="relative px-2 pb-12 dark:bg-immich-dark-bg dark:text-immich-dark-fg">
+    <DetailPanelTags {asset} {isOwner} />
+  </section>
+{/if}
+
+{#if showEditFaces}
+  <PersonSidePanel
+    assetId={asset.id}
+    assetType={asset.type}
+    onClose={() => (showEditFaces = false)}
+    onRefresh={handleRefreshPeople}
+  />
+{/if}
