@@ -252,7 +252,7 @@ export const defaults = Object.freeze<SystemConfig>({
     },
     clip: {
       enabled: true,
-      modelName: 'ViT-B-32__openai',
+      modelName: 'nllb-clip-base-siglip__v1',
     },
     duplicateDetection: {
       enabled: true,
