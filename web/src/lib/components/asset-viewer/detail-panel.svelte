@@ -56,7 +56,7 @@
 
   let { asset, currentAlbum = null }: Props = $props();
 
-  let showAssetPath = $state(false);
+  let showAssetPath = $state(true);
   let showEditFaces = $state(false);
   let isOwner = $derived($user?.id === asset.ownerId);
   let people = $derived(asset.people || []);
@@ -372,7 +372,7 @@
           {/if}
         </p>
         {#if showAssetPath}
-          <p class="text-xs opacity-50 break-all pb-2 hover:text-primary" transition:slide={{ duration: 250 }}>
+          <p class="text-sm opacity-90 break-all pb-2 hover:text-primary" transition:slide={{ duration: 250 }}>
             <!-- eslint-disable-next-line svelte/no-navigation-without-resolve this is supposed to be treated as an absolute/external link -->
             <a href={getAssetFolderHref(asset)} title={$t('go_to_folder')} class="whitespace-pre-wrap">
               {asset.originalPath}
