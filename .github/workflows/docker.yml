@@ -15,19 +15,18 @@ concurrency:
 permissions: {}
 
 jobs:
-  build:
+  pre-job:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
     steps:
-      - uses: actions/checkout@v4
-      
-      # 登录 ghcr.io
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+      - id: token
+        uses: immich-app/devtools/actions/create-workflow-token@05e16407c0a5492138bb38139c9d9bf067b40886 # create-workflow-token-action-v1.0.1
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          # 👇 使用内置令牌，无需手动创建密钥
-          password: ${{ secrets.GITHUB_TOKEN }}
+          app-id: ${{ secrets.PUSH_O_MATIC_APP_ID }}
+          private-key: ${{ secrets.PUSH_O_MATIC_APP_KEY }}
 
       - name: Check what should run
         id: check
